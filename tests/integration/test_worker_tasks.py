@@ -69,7 +69,7 @@ def test_run_job_retries_while_the_instrument_is_busy(
     monkeypatch.setattr(tasks.run_job, "retry", fake_retry)
     with pytest.raises(Retry):
         tasks.run_job.run(str(job_id))
-    assert retries == [{"countdown": tasks.BUSY_RETRY_S, "max_retries": None}]
+    assert retries == [{"countdown": tasks.BUSY_RETRY_S}]
     assert load(session_factory, job_id).status is JobStatus.QUEUED
 
 
@@ -141,3 +141,9 @@ def test_poll_task_reports_instrument_statuses(
 
     instrument_id = make_instrument(session_factory, sim.port, status=InstrumentStatus.OFFLINE)
     assert tasks.poll_instruments_task.run() == {str(instrument_id): "online"}
+
+
+def test_busy_retries_are_unlimited(tasks: ModuleType) -> None:
+    """Celery treats retry(max_retries=None) as "task default" (3), so the limit is on the task."""
+    assert tasks.run_job.max_retries is None
+    assert tasks.run_job.default_retry_delay is not None

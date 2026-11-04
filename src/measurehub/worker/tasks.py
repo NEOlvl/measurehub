@@ -36,13 +36,15 @@ def get_context() -> EngineContext:
     )
 
 
-@celery_app.task(bind=True, name="measurehub.run_job")
+# max_retries=None: wait for a busy instrument as long as it takes. (Passing None to
+# self.retry() would mean "the task default", i.e. 3 retries, and the job would be stuck.)
+@celery_app.task(bind=True, name="measurehub.run_job", max_retries=None)
 def run_job(self: Task[Any, Any], job_id: str) -> str | None:
     """Measure a job. If the instrument is busy, retry later; the job stays queued."""
     try:
         status = execute_job(uuid.UUID(job_id), get_context())
     except InstrumentBusyError:
-        raise self.retry(countdown=BUSY_RETRY_S, max_retries=None) from None
+        raise self.retry(countdown=BUSY_RETRY_S) from None
     return status.value if status else None
 
 
