@@ -16,7 +16,7 @@ import math
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,6 +26,14 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session, sessionmaker
 
+from measurehub.core.events import (
+    EventSink,
+    NullEventSink,
+    error_event,
+    log_event,
+    progress_event,
+    segment_event,
+)
 from measurehub.core.states import JobStatus
 from measurehub.db.models import (
     Instrument,
@@ -49,6 +57,7 @@ from measurehub.drivers.segments import split_sweep
 from measurehub.processing import registry
 from measurehub.processing.base import ProcessorInput, ProcessorResult
 from measurehub.worker.cancel import cancel_key
+from measurehub.worker.events import record_event
 from measurehub.worker.locks import InstrumentLock, LockLostError
 from measurehub.worker.transitions import transition
 
@@ -69,6 +78,7 @@ class EngineContext:
     driver_factory: DriverFactory
     lock_ttl_s: int = 30
     sleep: Callable[[float], None] = time.sleep
+    events: EventSink = field(default_factory=NullEventSink)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,31 +138,34 @@ def _run(
     session: Session, job_id: uuid.UUID, spec: _JobSpec, lock: InstrumentLock, ctx: EngineContext
 ) -> JobStatus | None:
     now = _now()
-    if not transition(
-        session, job_id, JobStatus.QUEUED, JobStatus.RUNNING, started_at=now, heartbeat_at=now
+    if not _move(
+        ctx, session, job_id, JobStatus.QUEUED, JobStatus.RUNNING, started_at=now, heartbeat_at=now
     ):
         return None
-    _set_instrument_status(session, spec.instrument_id, InstrumentStatus.BUSY)
+    _set_instrument_status(session, ctx, spec.instrument_id, InstrumentStatus.BUSY)
     state = JobStatus.RUNNING
     log.info("job_started")
     try:
         if _measure(session, job_id, spec, lock, ctx):
-            transition(session, job_id, JobStatus.RUNNING, JobStatus.CANCELLING)
-            transition(
-                session, job_id, JobStatus.CANCELLING, JobStatus.CANCELLED, finished_at=_now()
+            _move(ctx, session, job_id, JobStatus.RUNNING, JobStatus.CANCELLING)
+            _move(
+                ctx, session, job_id, JobStatus.CANCELLING, JobStatus.CANCELLED, finished_at=_now()
             )
             _finish(session, ctx, job_id, spec, InstrumentStatus.ONLINE)
             log.info("job_cancelled")
             return JobStatus.CANCELLED
         state = JobStatus.PROCESSING
-        transition(session, job_id, JobStatus.RUNNING, JobStatus.PROCESSING)
+        _move(ctx, session, job_id, JobStatus.RUNNING, JobStatus.PROCESSING)
         _process(session, job_id, spec)
-        transition(session, job_id, JobStatus.PROCESSING, JobStatus.COMPLETED, finished_at=_now())
+        _move(ctx, session, job_id, JobStatus.PROCESSING, JobStatus.COMPLETED, finished_at=_now())
     except Exception as exc:
         code, message = _describe(exc)
         if code == "internal_error":
             log.error("job_crashed", exc_info=exc)
-        failed = transition(
+        record_event(session, job_id, "error", "error", {"code": code, "message": message})
+        ctx.events.job(job_id, error_event(job_id, code, message))
+        failed = _move(
+            ctx,
             session,
             job_id,
             state,
@@ -162,8 +175,8 @@ def _run(
             finished_at=_now(),
         )
         if not failed:  # cancelled by the API while the error happened
-            transition(
-                session, job_id, JobStatus.CANCELLING, JobStatus.CANCELLED, finished_at=_now()
+            _move(
+                ctx, session, job_id, JobStatus.CANCELLING, JobStatus.CANCELLED, finished_at=_now()
             )
         _finish(session, ctx, job_id, spec, _instrument_status_after_error(code))
         log.warning("job_failed", error_code=code, error_message=message)
@@ -180,7 +193,7 @@ def _finish(
     spec: _JobSpec,
     instrument_status: InstrumentStatus,
 ) -> None:
-    _set_instrument_status(session, spec.instrument_id, instrument_status)
+    _set_instrument_status(session, ctx, spec.instrument_id, instrument_status)
     with contextlib.suppress(Exception):
         ctx.redis.delete(cancel_key(job_id))
 
@@ -194,10 +207,30 @@ def _instrument_status_after_error(code: str) -> InstrumentStatus:
 
 
 def _set_instrument_status(
-    session: Session, instrument_id: uuid.UUID, status: InstrumentStatus
+    session: Session, ctx: EngineContext, instrument_id: uuid.UUID, status: InstrumentStatus
 ) -> None:
     session.execute(update(Instrument).where(Instrument.id == instrument_id).values(status=status))
     session.commit()
+    ctx.events.instrument(instrument_id, status.value)
+
+
+def _move(
+    ctx: EngineContext,
+    session: Session,
+    job_id: uuid.UUID,
+    old: JobStatus,
+    new: JobStatus,
+    **values: Any,
+) -> bool:
+    return transition(session, job_id, old, new, events=ctx.events, **values)
+
+
+def _job_log(
+    session: Session, ctx: EngineContext, job_id: uuid.UUID, level: str, message: str
+) -> None:
+    """Write to the persistent job log and publish a ``log`` event."""
+    record_event(session, job_id, level, "log", {"message": message})
+    ctx.events.job(job_id, log_event(job_id, level, message))
 
 
 class _Link:
@@ -252,6 +285,13 @@ def _measure(
     ]
     if saved:
         log.info("job_resumed", points_saved=len(saved), segments_saved=len(complete))
+        _job_log(
+            session,
+            ctx,
+            job_id,
+            "info",
+            f"Продолжение измерения: уже сохранено {len(saved)} точек ({len(complete)} сегментов)",
+        )
         _update_progress(session, job_id, len(saved), len(complete))
     link = _Link(ctx, spec)
     try:
@@ -261,9 +301,25 @@ def _measure(
                 continue
             if _cancel_requested(session, ctx, job_id):
                 return True
-            data = _measure_with_retries(link, segment, spec, lock, ctx)
+            data = _measure_with_retries(session, job_id, link, segment, spec, lock, ctx)
             segments_done += 1
-            _save_segment(session, job_id, data, segments_done)
+            points_done = _save_segment(session, job_id, data, segments_done)
+            ctx.events.job(
+                job_id,
+                segment_event(
+                    job_id,
+                    segment.first_idx,
+                    data.freq_hz.tolist(),
+                    _to_db(data.s11),
+                    _to_db(data.s21),
+                ),
+            )
+            ctx.events.job(
+                job_id,
+                progress_event(
+                    job_id, points_done, spec.params.points, segments_done, len(segments)
+                ),
+            )
             lock.extend()
     finally:
         link.drop()
@@ -271,7 +327,13 @@ def _measure(
 
 
 def _measure_with_retries(
-    link: _Link, segment: Segment, spec: _JobSpec, lock: InstrumentLock, ctx: EngineContext
+    session: Session,
+    job_id: uuid.UUID,
+    link: _Link,
+    segment: Segment,
+    spec: _JobSpec,
+    lock: InstrumentLock,
+    ctx: EngineContext,
 ) -> SegmentData:
     """Measure one segment; on a driver failure reconnect, back off 1, 2, 4 ... s and retry."""
     attempt = 0
@@ -292,6 +354,14 @@ def _measure_with_retries(
                 delay_s=delay,
                 error_type=type(exc).__name__,
                 error=str(exc),
+            )
+            _job_log(
+                session,
+                ctx,
+                job_id,
+                "warning",
+                f"Повтор сегмента {segment.index}, попытка {attempt} из {spec.params.max_retries}"
+                f" через {delay:g} сек: {exc}",
             )
             _wait(delay, lock, ctx)
 
@@ -320,7 +390,7 @@ def _update_progress(
 
 def _save_segment(
     session: Session, job_id: uuid.UUID, data: SegmentData, segments_done: int
-) -> None:
+) -> int:
     """Store the points of one segment and advance progress in a single transaction.
 
     Re-saving a segment is harmless: ``(job_id, idx)`` is unique and conflicts are ignored.
@@ -356,6 +426,12 @@ def _save_segment(
     )
     session.commit()
     log.debug("segment_saved", segment=data.segment.index, points=count)
+    return int(count or 0)
+
+
+def _to_db(values: Any) -> list[float]:
+    """Magnitude in dB for the live graphs (floored so that a zero does not give -inf)."""
+    return [float(v) for v in 20 * np.log10(np.maximum(np.abs(values), 1e-12))]
 
 
 def _dialect_insert(session: Session) -> Any:

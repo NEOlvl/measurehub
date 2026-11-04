@@ -10,11 +10,18 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Query, Request, Response
 from sqlalchemy import select
 
-from measurehub.api.deps import CurrentUser, PagingParams, Session, get_or_404, paginate
+from measurehub.api.deps import (
+    CurrentUser,
+    Paging,
+    PagingParams,
+    Session,
+    get_or_404,
+    paginate,
+)
 from measurehub.api.errors import conflict, not_found
 from measurehub.core.states import JobStatus
-from measurehub.db.models import Job, MeasurementPoint, Result
-from measurehub.schemas.api import JobCreate, JobOut, Page, ResultOut
+from measurehub.db.models import Job, JobEvent, MeasurementPoint, Result
+from measurehub.schemas.api import JobCreate, JobEventOut, JobOut, Page, PointOut, ResultOut
 from measurehub.services.export import raw_csv, result_csv
 from measurehub.services.jobs import cancel_job, create_job, retry_job
 
@@ -25,7 +32,9 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 async def post_job(
     body: JobCreate, session: Session, user: CurrentUser, request: Request
 ) -> JobOut:
-    job = await create_job(session, body, user, request.app.state.dispatcher)
+    job = await create_job(
+        session, body, user, request.app.state.dispatcher, request.app.state.redis
+    )
     return JobOut.model_validate(job)
 
 
@@ -59,6 +68,33 @@ async def get_job(job_id: uuid.UUID, session: Session, user: CurrentUser) -> Job
     return JobOut.model_validate(await get_or_404(session, Job, job_id, "Job"))
 
 
+@router.get("/{job_id}/events")
+async def get_events(
+    job_id: uuid.UUID, session: Session, user: CurrentUser, paging: PagingParams
+) -> Page[JobEventOut]:
+    await get_or_404(session, Job, job_id, "Job")
+    stmt = select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+    return await paginate(session, stmt, paging, JobEventOut)
+
+
+@router.get("/{job_id}/points")
+async def get_points(
+    job_id: uuid.UUID,
+    session: Session,
+    user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=20_000)] = 1000,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[PointOut]:
+    """Raw points in measurement order; a whole 10 001-point sweep fits in one request."""
+    await get_or_404(session, Job, job_id, "Job")
+    stmt = (
+        select(MeasurementPoint)
+        .where(MeasurementPoint.job_id == job_id)
+        .order_by(MeasurementPoint.idx)
+    )
+    return await paginate(session, stmt, Paging(limit, offset), PointOut)
+
+
 @router.post("/{job_id}/cancel")
 async def post_cancel(
     job_id: uuid.UUID, session: Session, user: CurrentUser, request: Request
@@ -72,7 +108,9 @@ async def post_retry(
     job_id: uuid.UUID, session: Session, user: CurrentUser, request: Request
 ) -> JobOut:
     job = await get_or_404(session, Job, job_id, "Job")
-    return JobOut.model_validate(await retry_job(session, job, user, request.app.state.dispatcher))
+    return JobOut.model_validate(
+        await retry_job(session, job, user, request.app.state.dispatcher, request.app.state.redis)
+    )
 
 
 async def _current_result(session: Session, job: Job) -> Result:

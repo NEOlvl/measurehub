@@ -22,6 +22,7 @@ from measurehub.db import models
 from measurehub.db.base import Base
 from measurehub.drivers.registry import create_driver
 from measurehub.worker.engine import EngineContext, execute_job
+from measurehub.worker.events import RedisEventSink
 from simulator.model import Sample
 from simulator.scpi import ScpiEngine
 from simulator.server import SimulatorThread
@@ -78,14 +79,16 @@ def engine_ctx(
     redis_server: fakeredis.FakeServer,
     sleeps: list[float],
 ) -> EngineContext:
+    redis = fakeredis.FakeRedis(server=redis_server)
     return EngineContext(
         session_factory=session_factory,
-        redis=fakeredis.FakeRedis(server=redis_server),
+        redis=redis,
         driver_factory=lambda key, resource: create_driver(
             key, resource, timeout_ms=500, connect_attempts=1
         ),
         lock_ttl_s=30,
         sleep=sleeps.append,
+        events=RedisEventSink(redis),
     )
 
 

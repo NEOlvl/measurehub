@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from measurehub.core.events import EventSink
 from measurehub.db.models import Instrument, InstrumentStatus
 from measurehub.drivers.errors import DriverError, InstrumentError
 from measurehub.drivers.registry import DriverFactory
@@ -32,7 +33,10 @@ def probe(
 
 
 def poll_instruments(
-    session_factory: sessionmaker[Session], redis: Any, factory: DriverFactory
+    session_factory: sessionmaker[Session],
+    redis: Any,
+    factory: DriverFactory,
+    events: EventSink | None = None,
 ) -> dict[uuid.UUID, InstrumentStatus]:
     """Check every enabled instrument that is not being measured; returns the new statuses.
 
@@ -60,4 +64,6 @@ def poll_instruments(
             )
             session.commit()
             result[instrument_id] = new_status
+            if events is not None and new_status is not status:
+                events.instrument(instrument_id, new_status.value)
         return result

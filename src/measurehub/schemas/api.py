@@ -166,3 +166,21 @@ class ResultOut(_Out):
     data: dict[str, Any]
     summary: dict[str, Any]
     created_at: datetime
+
+
+class JobEventOut(_Out):
+    id: int
+    job_id: uuid.UUID
+    ts: datetime
+    level: str
+    event: str
+    payload: dict[str, Any]
+
+
+class PointOut(_Out):
+    idx: int
+    freq_hz: float
+    s11_re: float
+    s11_im: float
+    s21_re: float
+    s21_im: float

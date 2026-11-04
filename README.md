@@ -1,9 +1,11 @@
 # MeasureHub
 
 SCPI-симулятор векторного анализатора цепей (VNA), драйвер на PyVISA и восстановление ε и μ
-методом Николсона–Росса–Вейра (NRW). Версия `v0.3.0`: REST API на FastAPI, PostgreSQL, фоновое
-измерение воркером Celery, запуск одной командой `docker compose up` и отказоустойчивость
-(повторы, возобновление, отмена, сторож), проверенная тестами с внедрением сбоев.
+методом Николсона–Росса–Вейра (NRW). Версия `v0.4.0`: REST API на FastAPI, PostgreSQL, фоновое измерение воркером Celery,
+отказоустойчивость (повторы, возобновление, отмена, сторож), события в реальном времени по
+WebSocket и клиент оператора на PyQt6. Запуск сервера одной командой `docker compose up`.
+
+![Карточка задания: живые графики |S11| и |S21|](docs/screenshots/job-live.png)
 
 ```mermaid
 flowchart LR
@@ -42,12 +44,53 @@ curl -s $BASE/jobs/$JOB/result -H "$AUTH"               # ε′, ε″, μ′, �
 curl -s "$BASE/jobs/$JOB/export?format=csv" -H "$AUTH" -o result.csv
 ```
 
-Пока в API нет WebSocket: прогресс читается опросом `GET /jobs/{id}` (`status`, `points_done`).
+Прогресс можно читать опросом `GET /jobs/{id}` (`status`, `points_done`) или по WebSocket (см. ниже).
 
 ```bash
 curl -s -X POST $BASE/jobs/$JOB/cancel -H "$AUTH"   # отмена: после текущего сегмента
 curl -s -X POST $BASE/jobs/$JOB/retry  -H "$AUTH"   # новое задание с теми же параметрами
 ```
+
+## Клиент оператора
+
+```bash
+pip install -e ".[client]"          # PyQt6 и pyqtgraph
+measurehub-client --url http://localhost:8000
+```
+
+Вход (`operator` / `operator-dev-password` из compose) → список приборов со статусами в реальном
+времени → «Новое задание» (методика, прибор, образец, параметры из JSON Schema) → карточка
+задания: прогресс, журнал, графики |S11| и |S21| в дБ, отмена и повтор → «Результат»: графики
+ε′, ε″, μ′, μ″ и выгрузка CSV и JSON. При обрыве связи клиент переподключается сам и дозагружает
+пропущенные точки; при истечении сессии показывает окно входа.
+
+| Приборы и статусы | Результат |
+| --- | --- |
+| ![Приборы](docs/screenshots/instruments.png) | ![Результат](docs/screenshots/result.png) |
+
+Снимки экрана делает `python scripts/screenshots.py` на поднятом стеке. Весь сценарий от входа до
+выгрузки проверяет `tests/client/test_scenario.py`: окна клиента работают с настоящим сервером по
+HTTP и WebSocket (без экрана, `QT_QPA_PLATFORM=offscreen`).
+
+## События в реальном времени
+
+`ws://host/ws/jobs/{id}?token=<access>` — всё про задание, `ws://host/ws/events?token=<access>` —
+статусы заданий и приборов. Первое сообщение — `snapshot` текущего состояния, дальше события:
+
+```json
+{"type": "snapshot", "job_id": "…", "status": "running", "points_done": 300, "points_total": 901}
+{"type": "status", "job_id": "…", "status": "processing", "ts": "2026-11-05T10:00:00Z"}
+{"type": "progress", "job_id": "…", "points_done": 350, "points_total": 901, "segments_done": 7}
+{"type": "segment", "job_id": "…", "from_idx": 300, "freq_hz": [], "s11_db": [], "s21_db": []}
+{"type": "log", "job_id": "…", "level": "warning", "message": "Повтор сегмента 7, попытка 2 …"}
+{"type": "error", "job_id": "…", "code": "instrument_timeout", "message": "…"}
+{"type": "instrument", "instrument_id": "…", "status": "busy"}
+```
+
+История не теряется: смены статуса, повторы и ошибки пишутся в `GET /jobs/{id}/events`, сырые
+точки читаются из `GET /jobs/{id}/points`. Неверный токен закрывается кодом 4401, неизвестное
+задание — 4404. Задержка события от воркера до клиента меньше секунды (NFR-03): это проверяет
+e2e-тест на поднятом стеке. Решения — `docs/adr/ADR-005-events-and-websocket.md`.
 
 ## Отказоустойчивость
 
@@ -121,6 +164,7 @@ measurehub measure --resource "TCPIP0::localhost::5025::SOCKET" --sample "d_mm=3
 | `src/measurehub/api/` | FastAPI: роутеры `/api/v1`, ошибки `problem+json`, `/health/*` |
 | `src/measurehub/db/`, `migrations/` | ORM-модели SQLAlchemy 2 и миграции Alembic |
 | `src/measurehub/worker/` | Celery, блокировка прибора в Redis, движок заданий |
+| `client/measurehub_client/` | Клиент оператора: PyQt6, pyqtgraph, QWebSocket |
 | `deploy/`, `compose.yaml` | Dockerfile и Docker Compose |
 
 ### Соглашения
@@ -163,8 +207,8 @@ MH_E2E_URL=http://localhost:8000 pytest tests/e2e
 
 ### Что пока не сделано (по плану фаз)
 
-Роли и refresh-токен, версионирование методик, WebSocket, журнал событий задания, аудит,
-повторная обработка результата (`reprocess`), клиент оператора.
+Роли и refresh-токен, версионирование методик, аудит, повторная обработка результата
+(`reprocess`).
 
 ## Лицензия
 

@@ -175,3 +175,17 @@ class Result(Base):
     is_current: Mapped[bool] = mapped_column(Boolean, default=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = _timestamp()
+
+
+class JobEvent(Base):
+    """Persistent log of a job: status changes, retries, errors (``GET /jobs/{id}/events``)."""
+
+    __tablename__ = "job_events"
+    __table_args__ = (Index("ix_job_events_job_id_id", "job_id", "id"),)
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    level: Mapped[str] = mapped_column(String(10))
+    event: Mapped[str] = mapped_column(String(30))
+    payload: Mapped[dict[str, Any]] = mapped_column(JsonType)

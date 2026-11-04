@@ -16,6 +16,7 @@ from measurehub.drivers.registry import create_driver
 from measurehub.services.instruments import poll_instruments
 from measurehub.worker.app import celery_app
 from measurehub.worker.engine import EngineContext, InstrumentBusyError, execute_job
+from measurehub.worker.events import RedisEventSink
 from measurehub.worker.watchdog import requeue_stale_jobs
 
 BUSY_RETRY_S = 5
@@ -26,9 +27,11 @@ def get_context() -> EngineContext:
     """Per-process resources, created on first use (i.e. after the worker process forked)."""
     settings = get_settings()
     configure_logging(settings.log_level)
+    redis = Redis.from_url(settings.redis_url)
     return EngineContext(
         session_factory=make_sync_sessionmaker(make_sync_engine(settings)),
-        redis=Redis.from_url(settings.redis_url),
+        redis=redis,
+        events=RedisEventSink(redis),
         driver_factory=lambda key, resource: create_driver(
             key, resource, timeout_ms=settings.visa_timeout_ms
         ),
@@ -57,6 +60,7 @@ def watchdog() -> dict[str, int]:
         lambda job_id: run_job.delay(str(job_id)),
         stale_after_s=settings.watchdog_stale_s,
         max_requeues=settings.watchdog_max_requeues,
+        events=get_context().events,
     )
     return {
         "requeued": len(report.requeued),
@@ -69,5 +73,5 @@ def watchdog() -> dict[str, int]:
 def poll_instruments_task() -> dict[str, str]:
     """Refresh the status of idle instruments (runs from Celery beat)."""
     ctx = get_context()
-    statuses = poll_instruments(ctx.session_factory, ctx.redis, ctx.driver_factory)
+    statuses = poll_instruments(ctx.session_factory, ctx.redis, ctx.driver_factory, ctx.events)
     return {str(instrument_id): status.value for instrument_id, status in statuses.items()}

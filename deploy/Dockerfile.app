@@ -9,6 +9,7 @@ WORKDIR /app
 COPY pyproject.toml README.md alembic.ini ./
 COPY src ./src
 COPY simulator ./simulator
+COPY client ./client
 COPY migrations ./migrations
 RUN pip install .
 

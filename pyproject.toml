@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "measurehub"
-version = "0.3.0"
+version = "0.4.0"
 description = "SCPI VNA simulator, PyVISA driver and Nicolson-Ross-Weir processing"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,6 +17,7 @@ dependencies = [
     "pyvisa-py>=0.7",
     "fastapi>=0.115",
     "uvicorn>=0.30",
+    "websockets>=12",
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29",
     "psycopg[binary]>=3.2",
@@ -30,7 +31,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+client = [
+    "PyQt6>=6.7,<6.12",  # the stubs of 6.12.0 are not valid Python and break mypy
+    "pyqtgraph>=0.13",
+]
 dev = [
+    "measurehub[client]",
+    "pytest-qt>=4.4",
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.6",
@@ -40,32 +47,42 @@ dev = [
     "pytest-asyncio>=0.24",
     "aiosqlite>=0.20",
     "fakeredis[lua]>=2.23",
+    "pytest-timeout>=2.3",
 ]
 
 [project.scripts]
 measurehub = "measurehub.cli:main"
 measurehub-sim = "simulator.__main__:main"
 
+[project.gui-scripts]
+measurehub-client = "measurehub_client.main:main"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/measurehub", "simulator"]
+packages = ["src/measurehub", "simulator", "client/measurehub_client"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "."]
+src = ["src", ".", "client"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "C4", "RUF", "PT"]
+# the UI and the messages are Russian: Cyrillic letters that look Latin are fine
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 strict = true
 python_version = "3.12"
-files = ["src/measurehub", "simulator", "tests", "migrations"]
+files = ["src/measurehub", "simulator", "client/measurehub_client", "tests", "migrations"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["pyvisa_py.*", "celery.*", "kombu.*", "fakeredis.*"]
+module = ["pyvisa_py.*", "celery.*", "kombu.*", "fakeredis.*", "pyqtgraph.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["measurehub_client.*"]
+disallow_subclassing_any = false
 
 [[tool.mypy.overrides]]
 module = ["measurehub.worker.tasks", "measurehub.worker.app"]
@@ -75,12 +92,14 @@ disallow_untyped_decorators = false
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
+timeout = 180
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+qt_api = "pyqt6"
 markers = ["e2e: needs a running docker compose stack (MH_E2E_URL)"]
 
 [tool.coverage.run]
-source = ["measurehub", "simulator"]
+source = ["measurehub", "simulator", "measurehub_client"]
 branch = true
 concurrency = ["thread", "greenlet"]
 

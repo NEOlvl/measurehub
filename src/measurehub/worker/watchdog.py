@@ -12,9 +12,10 @@ import structlog
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from measurehub.core.events import EventSink
 from measurehub.core.states import JobStatus
 from measurehub.db.models import Job
-from measurehub.worker.transitions import transition
+from measurehub.worker.transitions import announce, transition
 
 log = structlog.get_logger()
 
@@ -35,6 +36,7 @@ def requeue_stale_jobs(
     stale_after_s: float = 60,
     max_requeues: int = 2,
     now: datetime | None = None,
+    events: EventSink | None = None,
 ) -> WatchdogReport:
     """Handle running jobs without a heartbeat for ``stale_after_s`` seconds.
 
@@ -56,11 +58,19 @@ def requeue_stale_jobs(
         ).all()
         for job_id, status, attempt in stale:
             if status is JobStatus.CANCELLING:
-                if _stale_update(session, job_id, cutoff, status, JobStatus.CANCELLED):
+                if _stale_update(
+                    session, job_id, cutoff, status, JobStatus.CANCELLED, events=events
+                ):
                     report.cancelled.append(job_id)
             elif attempt < max_requeues:
                 if _stale_update(
-                    session, job_id, cutoff, status, JobStatus.QUEUED, attempt=Job.attempt + 1
+                    session,
+                    job_id,
+                    cutoff,
+                    status,
+                    JobStatus.QUEUED,
+                    events=events,
+                    attempt=Job.attempt + 1,
                 ):
                     report.requeued.append(job_id)
             elif _stale_update(
@@ -69,13 +79,14 @@ def requeue_stale_jobs(
                 cutoff,
                 status,
                 JobStatus.FAILED,
+                events=events,
                 error_code="worker_lost",
                 error_message=f"Worker lost; the job was already re-queued {attempt} times",
                 finished_at=datetime.now(UTC),
             ):
                 report.failed.append(job_id)
         for job_id in list(report.requeued):
-            _dispatch(session, dispatcher, job_id, report)
+            _dispatch(session, dispatcher, job_id, report, events)
     log.info(
         "watchdog_checked",
         requeued=len(report.requeued),
@@ -91,6 +102,8 @@ def _stale_update(
     cutoff: datetime,
     old: JobStatus,
     new: JobStatus,
+    *,
+    events: EventSink | None = None,
     **values: Any,
 ) -> bool:
     result = cast(
@@ -104,11 +117,16 @@ def _stale_update(
     session.commit()
     if result.rowcount == 1:
         log.warning("watchdog_moved_job", job_id=str(job_id), old=old.value, new=new.value)
+        announce(session, events, job_id, old, new)
     return result.rowcount == 1
 
 
 def _dispatch(
-    session: Session, dispatcher: Dispatcher, job_id: uuid.UUID, report: WatchdogReport
+    session: Session,
+    dispatcher: Dispatcher,
+    job_id: uuid.UUID,
+    report: WatchdogReport,
+    events: EventSink | None,
 ) -> None:
     try:
         dispatcher(job_id)
@@ -119,6 +137,7 @@ def _dispatch(
             job_id,
             JobStatus.QUEUED,
             JobStatus.FAILED,
+            events=events,
             error_code="dispatch_failed",
             error_message=f"Could not re-enqueue the job: {type(exc).__name__}",
             finished_at=datetime.now(UTC),

@@ -17,6 +17,7 @@ from measurehub.db.models import Instrument, Job, Method, Sample, User
 from measurehub.drivers.models import VnaSweepParams
 from measurehub.drivers.segments import split_sweep
 from measurehub.schemas.api import JobCreate
+from measurehub.services.events import announce_status
 from measurehub.services.methods import PROCESSORS_REQUIRING_SAMPLE, validate_params
 from measurehub.worker.cancel import CANCEL_FLAG_TTL_S, cancel_key
 
@@ -25,7 +26,11 @@ Dispatcher = Callable[[uuid.UUID], str | None]
 
 
 async def create_job(
-    session: AsyncSession, body: JobCreate, user: User, dispatcher: Dispatcher
+    session: AsyncSession,
+    body: JobCreate,
+    user: User,
+    dispatcher: Dispatcher,
+    redis: Any = None,
 ) -> Job:
     method = await session.get(Method, body.method_id)
     if method is None:
@@ -56,11 +61,12 @@ async def create_job(
     )
     session.add(job)
     await session.commit()
-    await _dispatch(session, job, dispatcher)
+    await announce_status(session, redis, job.id, None, JobStatus.QUEUED)
+    await _dispatch(session, job, dispatcher, redis)
     return job
 
 
-async def _dispatch(session: AsyncSession, job: Job, dispatcher: Dispatcher) -> None:
+async def _dispatch(session: AsyncSession, job: Job, dispatcher: Dispatcher, redis: Any) -> None:
     try:
         job.celery_task_id = await anyio.to_thread.run_sync(dispatcher, job.id)
     except Exception as exc:
@@ -69,11 +75,14 @@ async def _dispatch(session: AsyncSession, job: Job, dispatcher: Dispatcher) -> 
         job.error_message = f"Could not enqueue the job: {type(exc).__name__}"
         job.finished_at = datetime.now(UTC)
         await session.commit()
+        await announce_status(session, redis, job.id, JobStatus.QUEUED, JobStatus.FAILED)
         raise ApiError(503, "Service Unavailable", "Job queue is unavailable") from exc
     await session.commit()
 
 
-async def retry_job(session: AsyncSession, job: Job, user: User, dispatcher: Dispatcher) -> Job:
+async def retry_job(
+    session: AsyncSession, job: Job, user: User, dispatcher: Dispatcher, redis: Any = None
+) -> Job:
     """Create a new job with the same method, instrument, sample and parameters."""
     if job.status not in {JobStatus.FAILED, JobStatus.CANCELLED}:
         raise conflict(
@@ -85,7 +94,7 @@ async def retry_job(session: AsyncSession, job: Job, user: User, dispatcher: Dis
         sample_id=job.sample_id,
         params=job.params,
     )
-    return await create_job(session, body, user, dispatcher)
+    return await create_job(session, body, user, dispatcher, redis)
 
 
 async def cancel_job(session: AsyncSession, redis: Any, job: Job) -> Job:
@@ -95,13 +104,13 @@ async def cancel_job(session: AsyncSession, redis: Any, job: Job) -> Job:
     processing or finished cannot be cancelled (409).
     """
     if job.status is JobStatus.QUEUED and await _move(
-        session, job, JobStatus.QUEUED, JobStatus.CANCELLED, finished_at=datetime.now(UTC)
+        session, redis, job, JobStatus.QUEUED, JobStatus.CANCELLED, finished_at=datetime.now(UTC)
     ):
         return job
     if job.status in {JobStatus.QUEUED, JobStatus.RUNNING}:
         # the flag first: the worker looks at it between segments
         await redis.set(cancel_key(job.id), "1", ex=CANCEL_FLAG_TTL_S)
-        await _move(session, job, JobStatus.RUNNING, JobStatus.CANCELLING)
+        await _move(session, redis, job, JobStatus.RUNNING, JobStatus.CANCELLING)
     await session.refresh(job)
     if job.status not in {JobStatus.CANCELLING, JobStatus.CANCELLED}:
         raise conflict(f"Job is {job.status.value} and cannot be cancelled")
@@ -109,7 +118,7 @@ async def cancel_job(session: AsyncSession, redis: Any, job: Job) -> Job:
 
 
 async def _move(
-    session: AsyncSession, job: Job, old: JobStatus, new: JobStatus, **values: Any
+    session: AsyncSession, redis: Any, job: Job, old: JobStatus, new: JobStatus, **values: Any
 ) -> bool:
     """Atomic ``UPDATE ... WHERE status = old``; True if this call changed the status."""
     assert can_transition(old, new)
@@ -122,5 +131,6 @@ async def _move(
     await session.commit()
     if result.rowcount == 1:
         await session.refresh(job)
+        await announce_status(session, redis, job.id, old, new)
         return True
     return False

@@ -12,7 +12,7 @@ from redis.asyncio import Redis
 
 from measurehub import __version__
 from measurehub.api.errors import install_error_handlers
-from measurehub.api.routers import auth, health, instruments, jobs, methods, samples
+from measurehub.api.routers import auth, health, instruments, jobs, methods, samples, ws
 from measurehub.core.logging import configure_logging
 from measurehub.core.settings import Settings, get_settings
 from measurehub.db.session import make_async_engine, make_async_sessionmaker
@@ -59,6 +59,7 @@ def create_app(
     install_error_handlers(app)
 
     app.include_router(health.router)
+    app.include_router(ws.router)
     v1 = APIRouter(prefix="/api/v1")
     for module in (auth, instruments, methods, samples, jobs):
         v1.include_router(module.router)

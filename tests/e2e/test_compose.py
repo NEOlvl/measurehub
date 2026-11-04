@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import shutil
 import socket
@@ -217,3 +218,35 @@ def test_killed_worker_job_is_resumed_by_the_watchdog(api: httpx.Client) -> None
     assert len(set(freqs)) == 1001  # ... and nothing duplicated
     assert freqs == sorted(freqs)
     assert_recovered(api.get(f"/jobs/{job['id']}/result").json()["summary"], DEMO)
+
+
+def test_events_reach_a_websocket_client_within_a_second(api: httpx.Client) -> None:
+    """NFR-03 on the real stack: worker -> Redis -> API -> WebSocket client."""
+    from datetime import UTC, datetime
+
+    from websockets.sync.client import connect
+
+    assert BASE_URL is not None
+    params = {"points": 301, "segment_size": 50, "ifbw_hz": 100}  # about 3 s
+    ids = create_setup(api, 3.0, params)
+    job = api.post("/jobs", json=ids).json()
+    token = str(api.headers["Authorization"]).split()[1]
+    ws_url = BASE_URL.replace("http", "ws", 1) + f"/ws/jobs/{job['id']}?token={token}"
+
+    delays: list[float] = []
+    kinds: set[str] = set()
+    with connect(ws_url, open_timeout=10) as ws:
+        first = json.loads(ws.recv(timeout=10))
+        assert first["type"] == "snapshot"
+        while True:
+            message = json.loads(ws.recv(timeout=30))
+            received = datetime.now(UTC)
+            sent = datetime.fromisoformat(message["ts"].replace("Z", "+00:00"))
+            delays.append((received - sent).total_seconds())
+            kinds.add(message["type"])
+            if message["type"] == "status" and message["status"] in {"completed", "failed"}:
+                assert message["status"] == "completed"
+                break
+
+    assert {"segment", "progress", "status"} <= kinds
+    assert max(delays) < 1.0, delays
