@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     access_token_minutes: int = Field(default=60, ge=1)
     instrument_lock_ttl_s: int = Field(default=30, ge=1)
     visa_timeout_ms: int = Field(default=5000, ge=100)
+    watchdog_interval_s: int = Field(default=30, ge=1)
+    watchdog_stale_s: int = Field(default=60, ge=1)
+    watchdog_max_requeues: int = Field(default=2, ge=0)
+    poll_interval_s: int = Field(default=60, ge=1)
     log_level: str = "INFO"
     bootstrap_username: str | None = None
     bootstrap_password: str | None = None

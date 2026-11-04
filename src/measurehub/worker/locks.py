@@ -13,11 +13,15 @@ class LockLostError(Exception):
     """The lock expired or is owned by someone else: the instrument may be in use."""
 
 
+def lock_key(instrument_id: uuid.UUID) -> str:
+    return f"lock:instrument:{instrument_id}"
+
+
 class InstrumentLock:
     def __init__(self, redis: Any, instrument_id: uuid.UUID, ttl_s: int) -> None:
         self._ttl_s = ttl_s
         self._lock = redis.lock(
-            f"lock:instrument:{instrument_id}", timeout=ttl_s, blocking=False, thread_local=False
+            lock_key(instrument_id), timeout=ttl_s, blocking=False, thread_local=False
         )
 
     def acquire(self) -> bool:

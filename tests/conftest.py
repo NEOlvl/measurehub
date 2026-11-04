@@ -67,14 +67,25 @@ def sim() -> Iterator[SimulatorThread]:
 
 
 @pytest.fixture
+def sleeps() -> list[float]:
+    """Backoff delays requested by the engine (nothing really sleeps in tests)."""
+    return []
+
+
+@pytest.fixture
 def engine_ctx(
-    session_factory: sessionmaker[Session], redis_server: fakeredis.FakeServer
+    session_factory: sessionmaker[Session],
+    redis_server: fakeredis.FakeServer,
+    sleeps: list[float],
 ) -> EngineContext:
     return EngineContext(
         session_factory=session_factory,
         redis=fakeredis.FakeRedis(server=redis_server),
-        driver_factory=lambda key, resource: create_driver(key, resource, timeout_ms=3000),
+        driver_factory=lambda key, resource: create_driver(
+            key, resource, timeout_ms=500, connect_attempts=1
+        ),
         lock_ttl_s=30,
+        sleep=sleeps.append,
     )
 
 
@@ -124,7 +135,11 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 
 
 async def make_fixtures(
-    http: httpx.AsyncClient, sim_port: int, *, processor: str = "nrw"
+    http: httpx.AsyncClient,
+    sim_port: int,
+    *,
+    processor: str = "nrw",
+    method_params: dict[str, int | float] | None = None,
 ) -> dict[str, str]:
     """Create an instrument pointing at the simulator, a method and a 3 mm sample."""
     instrument = await http.post(
@@ -140,7 +155,7 @@ async def make_fixtures(
         json={
             "name": "quick",
             "processor": processor,
-            "params": {"points": 201, "segment_size": 50},
+            "params": method_params or {"points": 201, "segment_size": 50},
         },
     )
     sample = await http.post(

@@ -20,7 +20,8 @@ DIAGRAM = {
 
 def test_transition_table_matches_the_diagram() -> None:
     actual = {(a.value, b.value) for a, targets in ALLOWED_TRANSITIONS.items() for b in targets}
-    assert actual == DIAGRAM
+    # the only addition to the diagram: a job whose enqueue failed cannot stay queued forever
+    assert actual == DIAGRAM | {("queued", "failed")}
 
 
 @pytest.mark.parametrize("status", [JobStatus.FAILED, JobStatus.CANCELLED])

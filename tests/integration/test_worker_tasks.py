@@ -99,3 +99,45 @@ def test_app_factory_builds_the_app_from_the_environment(
         assert {"/health/live", "/api/v1/jobs"} <= set(app.openapi()["paths"])
     finally:
         settings_module.get_settings.cache_clear()
+
+
+def test_beat_schedules_the_watchdog_and_the_instrument_poll(tasks: ModuleType) -> None:
+    schedule = tasks.celery_app.conf.beat_schedule
+    assert schedule["watchdog"] == {"task": "measurehub.watchdog", "schedule": 30.0}
+    assert schedule["poll-instruments"] == {"task": "measurehub.poll_instruments", "schedule": 60.0}
+    assert {"measurehub.watchdog", "measurehub.poll_instruments"} <= set(tasks.celery_app.tasks)
+
+
+def test_watchdog_task_requeues_a_stale_job_and_enqueues_it(
+    tasks: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: sessionmaker[Session],
+    sim: SimulatorThread,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from measurehub.db.models import Job
+
+    job_id = make_job(session_factory, sim.port, status=JobStatus.RUNNING)
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.heartbeat_at = datetime.now(UTC) - timedelta(minutes=5)
+        session.commit()
+    sent: list[tuple[str, ...]] = []
+    monkeypatch.setattr(tasks.run_job, "delay", lambda *args: sent.append(args))
+
+    assert tasks.watchdog.run() == {"requeued": 1, "failed": 0, "cancelled": 0}
+
+    assert sent == [(str(job_id),)]
+    assert load(session_factory, job_id).status is JobStatus.QUEUED
+
+
+def test_poll_task_reports_instrument_statuses(
+    tasks: ModuleType, session_factory: sessionmaker[Session], sim: SimulatorThread
+) -> None:
+    from measurehub.db.models import InstrumentStatus
+    from tests.integration.test_watchdog import make_instrument
+
+    instrument_id = make_instrument(session_factory, sim.port, status=InstrumentStatus.OFFLINE)
+    assert tasks.poll_instruments_task.run() == {str(instrument_id): "online"}

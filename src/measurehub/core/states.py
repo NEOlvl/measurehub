@@ -16,7 +16,8 @@ class JobStatus(StrEnum):
 
 
 ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
-    JobStatus.QUEUED: frozenset({JobStatus.RUNNING, JobStatus.CANCELLED}),
+    # queued -> failed is not in the diagram: it is the outcome of a failed enqueue
+    JobStatus.QUEUED: frozenset({JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.FAILED}),
     JobStatus.RUNNING: frozenset(
         {JobStatus.PROCESSING, JobStatus.CANCELLING, JobStatus.QUEUED, JobStatus.FAILED}
     ),

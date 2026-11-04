@@ -6,6 +6,9 @@ x-app-env: &app-env
   MH_SECRET_KEY: ${MH_SECRET_KEY:-dev-only-secret-change-me-please}
   MH_BOOTSTRAP_USERNAME: ${MH_BOOTSTRAP_USERNAME:-operator}
   MH_BOOTSTRAP_PASSWORD: ${MH_BOOTSTRAP_PASSWORD:-operator-dev-password}
+  MH_WATCHDOG_INTERVAL_S: ${MH_WATCHDOG_INTERVAL_S:-30}
+  MH_WATCHDOG_STALE_S: ${MH_WATCHDOG_STALE_S:-60}
+  MH_POLL_INTERVAL_S: ${MH_POLL_INTERVAL_S:-60}
 
 services:
   postgres:
@@ -60,12 +63,25 @@ services:
       redis: { condition: service_healthy }
       simulator: { condition: service_started }
 
+  # Periodic tasks: the watchdog (re-queues jobs of dead workers) and the instrument poll.
+  beat:
+    build: { context: .., dockerfile: deploy/Dockerfile.app }
+    command: celery -A measurehub.worker.app:celery_app beat --loglevel=INFO --schedule /tmp/celerybeat-schedule
+    environment: *app-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
   simulator:
     build: { context: .., dockerfile: deploy/Dockerfile.simulator }
     environment:
       MH_SIM_EPS: ${MH_SIM_EPS:-10,0.5}
       MH_SIM_MU: ${MH_SIM_MU:-1.5,0.2}
       MH_SIM_THICKNESS_MM: ${MH_SIM_THICKNESS_MM:-3}
+      MH_SIM_FAULT_DROP: ${MH_SIM_FAULT_DROP:-0}
+      MH_SIM_FAULT_HANG: ${MH_SIM_FAULT_HANG:-0}
+      MH_SIM_FAULT_ERR: ${MH_SIM_FAULT_ERR:-0}
+      MH_SIM_FAULT_LATENCY_MS: ${MH_SIM_FAULT_LATENCY_MS:-0}
     ports:
       - "5025:5025"
 

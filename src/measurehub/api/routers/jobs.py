@@ -16,7 +16,7 @@ from measurehub.core.states import JobStatus
 from measurehub.db.models import Job, MeasurementPoint, Result
 from measurehub.schemas.api import JobCreate, JobOut, Page, ResultOut
 from measurehub.services.export import raw_csv, result_csv
-from measurehub.services.jobs import create_job
+from measurehub.services.jobs import cancel_job, create_job, retry_job
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -57,6 +57,22 @@ async def list_jobs(
 @router.get("/{job_id}")
 async def get_job(job_id: uuid.UUID, session: Session, user: CurrentUser) -> JobOut:
     return JobOut.model_validate(await get_or_404(session, Job, job_id, "Job"))
+
+
+@router.post("/{job_id}/cancel")
+async def post_cancel(
+    job_id: uuid.UUID, session: Session, user: CurrentUser, request: Request
+) -> JobOut:
+    job = await get_or_404(session, Job, job_id, "Job")
+    return JobOut.model_validate(await cancel_job(session, request.app.state.redis, job))
+
+
+@router.post("/{job_id}/retry", status_code=201)
+async def post_retry(
+    job_id: uuid.UUID, session: Session, user: CurrentUser, request: Request
+) -> JobOut:
+    job = await get_or_404(session, Job, job_id, "Job")
+    return JobOut.model_validate(await retry_job(session, job, user, request.app.state.dispatcher))
 
 
 async def _current_result(session: Session, job: Job) -> Result:

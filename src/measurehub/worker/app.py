@@ -20,6 +20,16 @@ def make_celery(settings: Settings) -> Celery:
         broker_transport_options={"visibility_timeout": 3600},
         worker_hijack_root_logger=False,
         worker_redirect_stdouts=False,
+        beat_schedule={
+            "watchdog": {
+                "task": "measurehub.watchdog",
+                "schedule": float(settings.watchdog_interval_s),
+            },
+            "poll-instruments": {
+                "task": "measurehub.poll_instruments",
+                "schedule": float(settings.poll_interval_s),
+            },
+        },
     )
     return app
 

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 jobs:
   lint:
@@ -19,6 +20,7 @@ jobs:
       - run: ruff format --check .
       - run: mypy
 
+  # Includes the four fault-tolerance scenarios (tests/integration/test_resilience.py).
   test:
     runs-on: ubuntu-latest
     steps:
@@ -29,3 +31,41 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: pytest --cov
+
+  # Full stack in Docker Compose: PostgreSQL, Redis, API, Celery worker and beat, simulator.
+  # Runs on main and on pull requests labelled "e2e".
+  e2e:
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'e2e')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # a fast watchdog keeps the crash scenario short
+      MH_WATCHDOG_STALE_S: "10"
+      MH_WATCHDOG_INTERVAL_S: "5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Start the stack
+        run: |
+          docker compose up --build -d
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8000/health/ready && exit 0
+            sleep 2
+          done
+          docker compose ps -a
+          docker compose logs
+          exit 1
+      - name: End-to-end tests
+        run: pytest tests/e2e --no-cov -v
+        env:
+          MH_E2E_URL: http://localhost:8000
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v

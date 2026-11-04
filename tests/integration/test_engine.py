@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -32,7 +33,9 @@ def make_job(
     *,
     processor: str = "nrw",
     status: JobStatus = JobStatus.QUEUED,
+    sweep: VnaSweepParams | None = None,
 ) -> uuid.UUID:
+    params = (sweep or VnaSweepParams(**PARAMS)).model_dump()
     with factory() as session:
         instrument = Instrument(
             name=f"i-{uuid.uuid4().hex[:6]}",
@@ -42,7 +45,7 @@ def make_job(
         method = Method(
             name=f"m-{uuid.uuid4().hex[:6]}",
             measurement_type="vna_sweep",
-            params=PARAMS,
+            params=params,
             processor=processor,
         )
         sample = Sample(code=f"s-{uuid.uuid4().hex[:6]}", material="x", thickness_mm=3.0)
@@ -52,10 +55,10 @@ def make_job(
             method_id=method.id,
             instrument_id=instrument.id,
             sample_id=sample.id,
-            params=PARAMS,
+            params=params,
             status=status,
-            points_total=100,
-            segments_total=4,
+            points_total=params["points"],
+            segments_total=len(split_sweep(VnaSweepParams(**params))),
         )
         session.add(job)
         session.commit()
@@ -146,9 +149,7 @@ def test_only_one_job_per_instrument_at_a_time(
         driver.measure_segment = measure  # type: ignore[method-assign]
         return driver
 
-    ctx = EngineContext(
-        engine_ctx.session_factory, engine_ctx.redis, spying_factory, engine_ctx.lock_ttl_s
-    )
+    ctx = replace(engine_ctx, driver_factory=spying_factory)
     assert execute_job(first, ctx) is JobStatus.COMPLETED
     assert outcomes == ["busy"]
     assert load(session_factory, second).status is JobStatus.QUEUED
@@ -192,9 +193,7 @@ def test_instrument_error_mid_measurement_fails_the_job_and_keeps_saved_points(
         driver.measure_segment = measure  # type: ignore[method-assign]
         return driver
 
-    ctx = EngineContext(
-        engine_ctx.session_factory, engine_ctx.redis, failing_factory, engine_ctx.lock_ttl_s
-    )
+    ctx = replace(engine_ctx, driver_factory=failing_factory)
     assert execute_job(job_id, ctx) is JobStatus.FAILED
     job = load(session_factory, job_id)
     assert job.error_code == "instrument_error"
@@ -228,9 +227,7 @@ def test_lock_loss_fails_the_job(
         engine_ctx.redis.flushall()  # the lock key vanishes, as if its TTL had expired
         return real_factory(key, resource)
 
-    ctx = EngineContext(
-        engine_ctx.session_factory, engine_ctx.redis, stealing_factory, engine_ctx.lock_ttl_s
-    )
+    ctx = replace(engine_ctx, driver_factory=stealing_factory)
     assert execute_job(job_id, ctx) is JobStatus.FAILED
     assert load(session_factory, job_id).error_code == "lock_lost"
 
@@ -258,8 +255,8 @@ def test_saving_a_segment_twice_does_not_duplicate_points(
         driver.close()
 
     with session_factory() as session:
-        _save_segment(session, job_id, data)
-        _save_segment(session, job_id, data)
+        _save_segment(session, job_id, data, 1)
+        _save_segment(session, job_id, data, 1)
         assert session.scalar(select(func.count()).select_from(MeasurementPoint)) == 25
     job = load(session_factory, job_id)
     assert job.points_done == 25

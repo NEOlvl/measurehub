@@ -43,6 +43,8 @@ class SimulatorServer:
             while raw := await reader.readline():
                 line = raw.decode("ascii", errors="replace").strip()
                 for reply in self.engine.process_line(line):
+                    if reply.drop:
+                        return
                     if reply.delay_s > 0:
                         await asyncio.sleep(reply.delay_s)
                     if reply.text is not None:

@@ -51,6 +51,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=float(env("MH_SIM_TIME_SCALE", "1")),
         help="multiplier of the simulated sweep time (0 = instant)",
     )
+    parser.add_argument(
+        "--fault-drop",
+        type=float,
+        default=float(env("MH_SIM_FAULT_DROP", "0")),
+        help="probability that a received line closes the connection",
+    )
+    parser.add_argument(
+        "--fault-hang",
+        type=float,
+        default=float(env("MH_SIM_FAULT_HANG", "0")),
+        help="probability that a received line is never answered",
+    )
+    parser.add_argument(
+        "--fault-err",
+        type=float,
+        default=float(env("MH_SIM_FAULT_ERR", "0")),
+        help="probability that a received line fails with an instrument error",
+    )
+    parser.add_argument(
+        "--fault-latency-ms",
+        type=float,
+        default=float(env("MH_SIM_FAULT_LATENCY_MS", "0")),
+        help="extra delay of every answer",
+    )
+    parser.add_argument("--fault-seed", type=int, default=_env_int("MH_SIM_FAULT_SEED"))
     return parser
 
 
@@ -64,7 +89,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     eps_re, eps_loss = args.eps
     mu_re, mu_loss = args.mu
     sample = Sample.from_parts(eps_re, eps_loss, mu_re, mu_loss, args.thickness_mm / 1000)
-    engine = ScpiEngine(sample, seed=args.seed, noise_k=args.noise_k, time_scale=args.time_scale)
+    engine = ScpiEngine(
+        sample,
+        seed=args.seed,
+        noise_k=args.noise_k,
+        time_scale=args.time_scale,
+        fault_drop=args.fault_drop,
+        fault_hang=args.fault_hang,
+        fault_err=args.fault_err,
+        fault_latency_ms=args.fault_latency_ms,
+        fault_seed=args.fault_seed,
+    )
     server = SimulatorServer(engine, args.host, args.port)
 
     async def run() -> None:

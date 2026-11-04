@@ -18,7 +18,7 @@ class UnknownDriverError(KeyError):
 
 def _sim_vna(resource: str, timeout_ms: int, connect_attempts: int) -> InstrumentDriver:
     transport = VisaTransport(resource, timeout_ms=timeout_ms, connect_attempts=connect_attempts)
-    return SimVnaDriver(transport)
+    return SimVnaDriver(transport, timeout_margin_ms=timeout_ms)
 
 
 _DRIVERS: dict[str, Callable[[str, int, int], InstrumentDriver]] = {"sim_vna": _sim_vna}

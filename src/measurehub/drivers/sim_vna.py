@@ -16,12 +16,16 @@ from measurehub.drivers.segments import frequency_grid
 from measurehub.drivers.transport import Transport
 
 MAX_ERROR_QUEUE = 20
-SWEEP_TIMEOUT_MARGIN_MS = 5000
+DEFAULT_TIMEOUT_MARGIN_MS = 5000
 
 
 class SimVnaDriver:
-    def __init__(self, transport: Transport) -> None:
+    def __init__(
+        self, transport: Transport, timeout_margin_ms: int = DEFAULT_TIMEOUT_MARGIN_MS
+    ) -> None:
+        """``timeout_margin_ms`` is added to twice the sweep time to get the query timeout."""
         self._transport = transport
+        self._timeout_margin_ms = timeout_margin_ms
         self._params: VnaSweepParams | None = None
 
     def connect(self) -> None:
@@ -55,7 +59,7 @@ class SimVnaDriver:
         t.write(f"SENS:SWE:POIN {segment.count}")
         t.write("INIT:IMM")
         sweep_ms = int(segment.count * params.averaging / params.ifbw_hz * 1000)
-        timeout_ms = SWEEP_TIMEOUT_MARGIN_MS + 2 * sweep_ms
+        timeout_ms = self._timeout_margin_ms + 2 * sweep_ms
         t.query("*OPC?", timeout_ms=timeout_ms)
         raw = t.query("CALC:DATA:SDAT?", timeout_ms=timeout_ms)
         self._raise_on_errors()

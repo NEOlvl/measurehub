@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import time
 from collections import deque
 from collections.abc import Callable
@@ -49,6 +50,7 @@ class Reply:
 
     text: str | None = None
     delay_s: float = 0.0
+    drop: bool = False  # close the connection instead of answering
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,9 +113,21 @@ class ScpiEngine:
         noise_k: float = 1e-3,
         max_sweep_s: float = 5.0,
         time_scale: float = 1.0,
+        fault_drop: float = 0.0,
+        fault_hang: float = 0.0,
+        fault_err: float = 0.0,
+        fault_latency_ms: float = 0.0,
+        fault_seed: int | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.sample = sample
+        self.fault_drop = fault_drop
+        self.fault_hang = fault_hang
+        self.fault_err = fault_err
+        self.fault_latency_ms = fault_latency_ms
+        self._fault_rng = np.random.default_rng(fault_seed)
+        self.sweeps = 0
+        self.faults_injected = {"drop": 0, "hang": 0, "err": 0}
         self.noise_k = noise_k
         self.max_sweep_s = max_sweep_s
         self.time_scale = time_scale
@@ -183,6 +197,17 @@ class ScpiEngine:
         add("INITiate:IMMediate", event=self._init_imm)
         add("SENSe:FREQuency:DATA", get=lambda: _join_floats(self._grid(), ".15g"))
         add("CALCulate:DATA:SDATa", get=self._sdata)
+        for name, attr in (("DROP", "fault_drop"), ("HANG", "fault_hang"), ("ERR", "fault_err")):
+            add(
+                f"SIM:FAULT:{name}",
+                get=functools.partial(self._get_float, attr),
+                set=functools.partial(self._set_probability, attr),
+            )
+        add(
+            "SIM:FAULT:LATency",
+            get=functools.partial(self._get_float, "fault_latency_ms"),
+            set=self._set_latency,
+        )
         add("SIM:SAMPle:EPS", get=lambda: self._get_pair(self.sample.eps), set=self._set_eps)
         add("SIM:SAMPle:MU", get=lambda: self._get_pair(self.sample.mu), set=self._set_mu)
         add(
@@ -202,6 +227,19 @@ class ScpiEngine:
         value = _parse_float(arg)
         _check_range(value, FREQ_MIN_HZ, FREQ_MAX_HZ)
         setattr(self, attr, value)
+
+    def _get_float(self, attr: str) -> str:
+        return _fmt(float(getattr(self, attr)))
+
+    def _set_probability(self, attr: str, arg: str) -> None:
+        value = _parse_float(arg)
+        _check_range(value, 0.0, 1.0)
+        setattr(self, attr, value)
+
+    def _set_latency(self, arg: str) -> None:
+        value = _parse_float(arg)
+        _check_range(value, 0.0, 600_000.0)
+        self.fault_latency_ms = value
 
     def _set_points(self, arg: str) -> None:
         value = _parse_int(arg)
@@ -247,6 +285,7 @@ class ScpiEngine:
         self.sample = Sample(self.sample.eps, self.sample.mu, value)
 
     def _init_imm(self) -> None:
+        self.sweeps += 1
         if self.start_hz > self.stop_hz:
             raise ScpiError(-221, "Settings conflict")
         freq = self._grid()
@@ -270,6 +309,43 @@ class ScpiEngine:
         A failed query still answers with an empty line so that the client stays in lockstep and
         finds the cause in ``SYST:ERR?`` instead of timing out.
         """
+        if not self._is_fault_command(line):
+            injected = self._inject_fault(line)
+            if injected is not None:
+                return injected
+        replies = self._execute_line(line)
+        if self.fault_latency_ms and not self._is_fault_command(line):
+            lat = self.fault_latency_ms / 1000 * self.time_scale
+            replies = [Reply(r.text, r.delay_s + lat) for r in replies]
+        return replies
+
+    @staticmethod
+    def _is_fault_command(line: str) -> bool:
+        return line.strip().lstrip(":").upper().startswith("SIM:FAULT")
+
+    def _inject_fault(self, line: str) -> list[Reply] | None:
+        """Roll the dice for one received line; None means no fault.
+
+        - drop: the connection is closed without an answer;
+        - hang: the line is swallowed, the client runs into its timeout;
+        - err: the line is not executed, an instrument error is queued instead.
+        """
+        if not (self.fault_drop or self.fault_hang or self.fault_err):
+            return None
+        roll = float(self._fault_rng.random())
+        if roll < self.fault_drop:
+            self.faults_injected["drop"] += 1
+            return [Reply(drop=True)]
+        if roll < self.fault_drop + self.fault_hang:
+            self.faults_injected["hang"] += 1
+            return []
+        if roll < self.fault_drop + self.fault_hang + self.fault_err:
+            self.faults_injected["err"] += 1
+            self._errors.append(ScpiError(-300, "Device-specific error"))
+            return [Reply("")] if "?" in line else []
+        return None
+
+    def _execute_line(self, line: str) -> list[Reply]:
         replies: list[Reply] = []
         for command in line.split(";"):
             command = command.strip()

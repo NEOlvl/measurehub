@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "measurehub"
-version = "0.2.0"
+version = "0.3.0"
 description = "SCPI VNA simulator, PyVISA driver and Nicolson-Ross-Weir processing"
 readme = "README.md"
 requires-python = ">=3.12"
