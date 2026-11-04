@@ -1,0 +1,73 @@
+name: measurehub
+
+x-app-env: &app-env
+  MH_DATABASE_URL: postgresql+asyncpg://measurehub:${POSTGRES_PASSWORD:-measurehub}@postgres:5432/measurehub
+  MH_REDIS_URL: redis://redis:6379/0
+  MH_SECRET_KEY: ${MH_SECRET_KEY:-dev-only-secret-change-me-please}
+  MH_BOOTSTRAP_USERNAME: ${MH_BOOTSTRAP_USERNAME:-operator}
+  MH_BOOTSTRAP_PASSWORD: ${MH_BOOTSTRAP_PASSWORD:-operator-dev-password}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: measurehub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-measurehub}
+      POSTGRES_DB: measurehub
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U measurehub"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: { context: .., dockerfile: deploy/Dockerfile.app }
+    command: sh -c "alembic upgrade head && measurehub create-user --if-missing"
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    build: { context: .., dockerfile: deploy/Dockerfile.app }
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health/ready')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build: { context: .., dockerfile: deploy/Dockerfile.app }
+    command: celery -A measurehub.worker.app:celery_app worker --loglevel=INFO --concurrency=${WORKER_CONCURRENCY:-2}
+    environment: *app-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      simulator: { condition: service_started }
+
+  simulator:
+    build: { context: .., dockerfile: deploy/Dockerfile.simulator }
+    environment:
+      MH_SIM_EPS: ${MH_SIM_EPS:-10,0.5}
+      MH_SIM_MU: ${MH_SIM_MU:-1.5,0.2}
+      MH_SIM_THICKNESS_MM: ${MH_SIM_THICKNESS_MM:-3}
+    ports:
+      - "5025:5025"
+
+volumes:
+  pgdata:

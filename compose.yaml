@@ -1,0 +1,3 @@
+# `docker compose up` from the repository root starts the whole stack (see deploy/).
+include:
+  - deploy/docker-compose.yml
