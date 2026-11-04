@@ -158,9 +158,15 @@ def test_unopened_transport_raises_connection_error() -> None:
         VisaTransport("TCPIP0::x::1::SOCKET").write("*RST")
 
 
-def test_open_failure_is_a_connection_error() -> None:
+def _open_and_query(transport: VisaTransport) -> None:
+    transport.open()
+    transport.query("*IDN?")
+
+
+def test_unreachable_instrument_is_a_connection_error() -> None:
+    """Windows reports a refused connection on open, Linux on the first exchange."""
     transport = VisaTransport(
         "TCPIP0::127.0.0.1::1::SOCKET", timeout_ms=300, connect_attempts=2, retry_delay_s=0.01
     )
-    with pytest.raises(InstrumentConnectionError, match="cannot open"):
-        transport.open()
+    with pytest.raises(InstrumentConnectionError):
+        _open_and_query(transport)

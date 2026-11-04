@@ -62,7 +62,8 @@ def test_cli_reports_unreachable_instrument(
         ]
     )
     assert code == 1
-    assert "cannot open" in capsys.readouterr().err
+    # "cannot open" on Windows, the refused connection on the first exchange on Linux
+    assert capsys.readouterr().err.startswith("error: ")
 
 
 def test_cli_nrw_without_thickness_on_external_resource_is_a_usage_error(
